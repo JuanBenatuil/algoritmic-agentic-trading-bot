@@ -1,0 +1,14 @@
+# Conexión al broker Alpaca
+alpaca-py>=0.38.0
+
+# Manejo de datos
+pandas>=2.0.0
+
+# Análisis técnico
+pandas-ta>=0.4.0b0
+
+# Variables de entorno
+python-dotenv>=1.0.0
+
+# Scheduler para ejecución periódica
+schedule>=1.2.0

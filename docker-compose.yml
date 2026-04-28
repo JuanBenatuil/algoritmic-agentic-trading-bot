@@ -1,0 +1,50 @@
+# =============================================
+# docker-compose.yml — Auto DayTrading Bot
+# =============================================
+# Uso local (dev):     docker compose up --build
+# Uso en VPS (prod):   docker compose up -d --build
+#
+# Ambos servicios leen credenciales desde .env (nunca hardcodeadas).
+
+services:
+
+  # -------------------------------------------
+  # Servicio 1: Bot de Trading Automatizado
+  # -------------------------------------------
+  tradingbot:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: tradingbot:latest
+    restart: unless-stopped        # Se reinicia automáticamente en el VPS si el proceso muere
+    env_file:
+      - .env
+    volumes:
+      - ./logs:/app/logs           # Logs persistentes en el host (no se pierden al recrear el contenedor)
+    environment:
+      - PYTHONUNBUFFERED=1
+    # El bot NO depende del MCP server — ambos hablan con Alpaca directamente
+
+  # -------------------------------------------
+  # Servicio 2: Alpaca MCP Server
+  # Permite que Claude/Cowork interactúe con
+  # la cuenta de Alpaca vía protocolo MCP.
+  # -------------------------------------------
+  alpaca-mcp-server:
+    build:
+      context: ./alpaca-mcp-server
+      dockerfile: Dockerfile.dev
+    image: alpaca-mcp-server:dev
+    restart: unless-stopped
+    ports:
+      - "8000:8000"                # Exponer solo si necesitas acceso externo al MCP server
+    env_file:
+      - .env
+    volumes:
+      # FIX: montar el src del MCP server, no el del bot
+      - ./alpaca-mcp-server/src:/app/src:delegated
+      - ./alpaca-mcp-server/pyproject.toml:/app/pyproject.toml:ro
+      - ./alpaca-mcp-server/uv.lock:/app/uv.lock:ro
+    environment:
+      - PYTHONUNBUFFERED=1
+    command: ["alpaca-mcp-server", "--transport", "streamable-http", "--host", "0.0.0.0", "--port", "8000"]

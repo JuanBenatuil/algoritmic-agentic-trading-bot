@@ -1,0 +1,3 @@
+[submodule "alpaca-mcp-server"]
+	path = alpaca-mcp-server
+	url = https://github.com/alpacahq/alpaca-mcp-server.git
