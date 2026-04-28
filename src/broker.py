@@ -13,6 +13,30 @@ from alpaca.trading.models import TradeAccount
 from src.config import get_config
 
 
+def is_market_open(trading_client: TradingClient) -> bool:
+    """
+    Consulta el reloj de Alpaca para saber si el mercado está abierto.
+
+    El mercado de EE. UU. opera de lunes a viernes de 9:30 a 16:00 ET.
+    Esta función debe llamarse al inicio de cada ciclo para evitar intentar
+    operar fuera de horario (las órdenes de mercado serían rechazadas).
+
+    Args:
+        trading_client: Cliente de trading de Alpaca ya inicializado.
+
+    Returns:
+        bool: True si el mercado está abierto ahora mismo.
+
+    Raises:
+        RuntimeError: Si la consulta a la API falla.
+    """
+    try:
+        clock = trading_client.get_clock()
+        return clock.is_open
+    except Exception as e:
+        raise RuntimeError(f"Error al consultar el estado del mercado: {e}") from e
+
+
 def get_clients() -> tuple[TradingClient, StockHistoricalDataClient]:
     """
     Inicializa y retorna los clientes de Alpaca para trading y datos.

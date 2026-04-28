@@ -1,4 +1,4 @@
-# Variables de entorno — NUNCA subir al repositorio
+# Variables de entorno
 .env
 
 # Python
