@@ -3,55 +3,65 @@ execution.py — Módulo 4: Ejecución y Riesgo (Fracciones de Acciones).
 
 Estrategia de ejecución:
     - Las compras usan 'notional' (monto en dólares), no 'qty' (acciones enteras).
-      Esto permite comprar fracciones: $45 de SPY = ~0.063 acciones.
+      Esto permite comprar fracciones: $45 de SPY ≈ 0.063 acciones.
     - Alpaca no admite Bracket Orders en órdenes fraccionarias, por lo que
-      el Stop-Loss y Take-Profit se monitorean manualmente en cada ciclo.
-    - El estado de posiciones abiertas (precio de entrada, SL, TP) se persiste
-      en un archivo JSON para sobrevivir reinicios del bot.
+      el Stop-Loss y Take-Profit se monitoran manualmente en cada ciclo.
+    - El estado de posiciones abiertas se persiste en JSON para sobrevivir
+      reinicios del proceso.
 
-Parámetros de riesgo:
-    RISK_PER_TRADE  : % del saldo disponible a invertir por operación.
-    STOP_LOSS_PCT   : % de caída máxima aceptada desde el precio de entrada.
-    TAKE_PROFIT_PCT : % de ganancia objetivo desde el precio de entrada.
-    MIN_NOTIONAL    : Monto mínimo en dólares para abrir una posición (límite de Alpaca).
+Principios SOLID aplicados:
+    SRP — Cada función tiene una única responsabilidad: persistir, calcular,
+          abrir, cerrar o monitorear. La lógica de despacho está separada.
+    OCP — RiskConfig agrupa los parámetros; cambiarlos no requiere tocar la lógica.
+    DIP — Signal se importa al nivel del módulo (no dentro de la función),
+          eliminando la dependencia oculta que existía antes.
 """
 
 import json
 import os
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
 from alpaca.trading.client import TradingClient
-from alpaca.trading.requests import MarketOrderRequest
 from alpaca.trading.enums import OrderSide, TimeInForce
+from alpaca.trading.requests import MarketOrderRequest
 
-# ─────────────────────────────────────────────
-# Parámetros de gestión de riesgo
-# ─────────────────────────────────────────────
-RISK_PER_TRADE  = 0.10   # 10% del saldo disponible por operación
-STOP_LOSS_PCT   = 0.02   # Stop-Loss: 2% por debajo del precio de entrada
-TAKE_PROFIT_PCT = 0.04   # Take-Profit: 4% por encima (ratio riesgo/beneficio 1:2)
-MIN_NOTIONAL    = 1.0    # Mínimo $1 por orden (límite de Alpaca para fracciones)
+from src.analysis import Signal
+
+
+# ─── Configuración de riesgo ─────────────────────────────────────────────────
+
+@dataclass(frozen=True)
+class RiskConfig:
+    """Parámetros de gestión de riesgo (inmutables).
+
+    Centralizar aquí facilita ajustar el riesgo sin tocar la lógica (OCP).
+    """
+    risk_per_trade:  float = 0.10  # 10% del saldo disponible por operación
+    stop_loss_pct:   float = 0.02  # SL: 2% por debajo del precio de entrada
+    take_profit_pct: float = 0.04  # TP: 4% por encima (ratio riesgo/beneficio 1:2)
+    min_notional:    float = 1.0   # Mínimo $1 por orden (límite de Alpaca)
+
+
+DEFAULT_RISK = RiskConfig()
 
 # Archivo donde se guarda el estado de posiciones abiertas
-STATE_FILE = Path(os.getenv("STATE_FILE", "logs/posiciones.json"))
+_STATE_FILE = Path(os.getenv("STATE_FILE", "logs/posiciones.json"))
 
 
-# ─────────────────────────────────────────────
-# Gestión de estado persistente
-# ─────────────────────────────────────────────
+# ─── Persistencia de estado ──────────────────────────────────────────────────
 
 def _cargar_estado() -> dict:
-    """
-    Carga el estado de posiciones abiertas desde el archivo JSON.
+    """Carga el estado de posiciones desde el archivo JSON.
 
     Returns:
-        dict: {symbol: {entry_price, sl_price, tp_price, notional, opened_at}}
-              Diccionario vacío si el archivo no existe.
+        dict con estructura {symbol: {entry_price, sl_price, tp_price, ...}}.
+        Retorna diccionario vacío si el archivo no existe o está corrupto.
     """
-    if STATE_FILE.exists():
+    if _STATE_FILE.exists():
         try:
-            with open(STATE_FILE, "r") as f:
+            with open(_STATE_FILE, "r") as f:
                 return json.load(f)
         except (json.JSONDecodeError, IOError):
             return {}
@@ -59,94 +69,82 @@ def _cargar_estado() -> dict:
 
 
 def _guardar_estado(estado: dict) -> None:
-    """
-    Persiste el estado de posiciones abiertas en el archivo JSON.
+    """Persiste el estado de posiciones en el archivo JSON.
 
     Args:
-        estado: Diccionario con el estado actual de posiciones.
+        estado: Diccionario actualizado con posiciones abiertas.
     """
-    STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
-    with open(STATE_FILE, "w") as f:
+    _STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+    with open(_STATE_FILE, "w") as f:
         json.dump(estado, f, indent=2)
 
 
+# ─── Consulta de posiciones ──────────────────────────────────────────────────
+
 def get_posiciones_abiertas() -> dict:
-    """
-    Retorna el estado de las posiciones abiertas rastreadas por el bot.
+    """Retorna el estado de posiciones abiertas rastreadas por el bot.
 
     Returns:
-        dict: {symbol: {entry_price, sl_price, tp_price, notional, opened_at}}
+        dict con estructura {symbol: {entry_price, sl_price, tp_price, ...}}.
     """
     return _cargar_estado()
 
 
-# ─────────────────────────────────────────────
-# Cálculo de tamaño de posición
-# ─────────────────────────────────────────────
-
-def calcular_notional(saldo_disponible: float) -> float:
-    """
-    Calcula el monto en dólares a invertir en la siguiente operación.
-
-    Args:
-        saldo_disponible: Efectivo real disponible (T+1) en dólares.
-
-    Returns:
-        float: Monto en dólares a invertir (redondeado a 2 decimales).
-    """
-    return round(saldo_disponible * RISK_PER_TRADE, 2)
-
-
-# ─────────────────────────────────────────────
-# Verificación de posiciones
-# ─────────────────────────────────────────────
-
 def tiene_posicion_abierta(symbol: str) -> bool:
-    """
-    Verifica si el bot tiene registrada una posición abierta para el símbolo.
+    """Verifica si hay una posición registrada para el símbolo.
 
-    Usa el estado local (JSON) en lugar de consultar la API en cada ciclo.
+    Usa el estado local (JSON) en vez de consultar la API en cada ciclo.
 
     Args:
         symbol: Ticker del activo.
 
     Returns:
-        bool: True si hay una posición registrada para este símbolo.
+        True si hay una posición registrada para este símbolo.
     """
-    estado = _cargar_estado()
-    return symbol in estado
+    return symbol in _cargar_estado()
 
 
-# ─────────────────────────────────────────────
-# Apertura de posiciones (compra fraccionaria)
-# ─────────────────────────────────────────────
+# ─── Cálculo de tamaño de posición ──────────────────────────────────────────
+
+def calcular_notional(saldo_disponible: float, config: RiskConfig = DEFAULT_RISK) -> float:
+    """Calcula el monto en dólares a invertir en la siguiente operación.
+
+    Args:
+        saldo_disponible: Efectivo real disponible (T+1) en dólares.
+        config:           Parámetros de riesgo. Usa DEFAULT_RISK si se omite.
+
+    Returns:
+        Monto en dólares a invertir, redondeado a 2 decimales.
+    """
+    return round(saldo_disponible * config.risk_per_trade, 2)
+
+
+# ─── Apertura de posición (compra fraccionaria) ──────────────────────────────
 
 def abrir_posicion(
     trading_client: TradingClient,
     symbol: str,
     notional: float,
     precio_entrada: float,
-) -> bool:
-    """
-    Abre una posición fraccionaria enviando una Market Order por monto en dólares.
+    config: RiskConfig = DEFAULT_RISK,
+) -> None:
+    """Abre una posición fraccionaria enviando una Market Order por monto en dólares.
 
-    Calcula y registra los niveles de Stop-Loss y Take-Profit automáticamente.
-    Al no poder usar Bracket Orders, estos niveles se monitoran en cada ciclo.
+    Calcula los niveles de SL/TP y los registra en el estado local para
+    monitoreo manual (Alpaca no admite Bracket Orders en órdenes fraccionarias).
 
     Args:
-        trading_client:  Cliente de trading de Alpaca.
-        symbol:          Ticker del activo.
-        notional:        Monto en dólares a invertir.
-        precio_entrada:  Precio actual de referencia para calcular SL y TP.
-
-    Returns:
-        bool: True si la orden se envió correctamente.
+        trading_client: Cliente de trading de Alpaca.
+        symbol:         Ticker del activo.
+        notional:       Monto en dólares a invertir.
+        precio_entrada: Precio actual de referencia para calcular SL y TP.
+        config:         Parámetros de riesgo.
 
     Raises:
-        RuntimeError: Si la llamada a la API falla por error de red.
+        RuntimeError: Si la llamada a la API falla.
     """
-    sl_price = round(precio_entrada * (1 - STOP_LOSS_PCT), 4)
-    tp_price = round(precio_entrada * (1 + TAKE_PROFIT_PCT), 4)
+    sl_price = round(precio_entrada * (1 - config.stop_loss_pct),   4)
+    tp_price = round(precio_entrada * (1 + config.take_profit_pct), 4)
 
     try:
         orden = MarketOrderRequest(
@@ -156,173 +154,197 @@ def abrir_posicion(
             time_in_force=TimeInForce.DAY,
         )
         respuesta = trading_client.submit_order(orden)
-
-        # Registrar posición en el estado local
-        estado = _cargar_estado()
-        estado[symbol] = {
-            "entry_price": precio_entrada,
-            "sl_price":    sl_price,
-            "tp_price":    tp_price,
-            "notional":    notional,
-            "order_id":    str(respuesta.id),
-            "opened_at":   datetime.now(timezone.utc).isoformat(),
-        }
-        _guardar_estado(estado)
-        return True
-
     except Exception as e:
         raise RuntimeError(f"Error al abrir posición en {symbol}: {e}") from e
 
+    estado = _cargar_estado()
+    estado[symbol] = {
+        "entry_price": precio_entrada,
+        "sl_price":    sl_price,
+        "tp_price":    tp_price,
+        "notional":    notional,
+        "order_id":    str(respuesta.id),
+        "opened_at":   datetime.now(timezone.utc).isoformat(),
+    }
+    _guardar_estado(estado)
 
-# ─────────────────────────────────────────────
-# Cierre de posiciones
-# ─────────────────────────────────────────────
+
+# ─── Cierre de posición ──────────────────────────────────────────────────────
 
 def cerrar_posicion(
     trading_client: TradingClient,
     symbol: str,
     motivo: str = "señal de venta",
-) -> bool:
-    """
-    Cierra la posición abierta de un símbolo al precio de mercado
-    y elimina su registro del estado local.
+) -> None:
+    """Cierra la posición abierta de un símbolo al precio de mercado.
+
+    Elimina el registro del estado local una vez confirmado el cierre.
 
     Args:
         trading_client: Cliente de trading de Alpaca.
         symbol:         Ticker del activo a cerrar.
         motivo:         Razón del cierre (para el log).
 
-    Returns:
-        bool: True si el cierre se solicitó correctamente.
-
     Raises:
         RuntimeError: Si la llamada a la API falla.
     """
     try:
         trading_client.close_position(symbol)
-
-        # Eliminar del estado local
-        estado = _cargar_estado()
-        estado.pop(symbol, None)
-        _guardar_estado(estado)
-
-        print(f"  ✅ [{symbol}] POSICIÓN CERRADA — motivo: {motivo}")
-        return True
-
     except Exception as e:
         raise RuntimeError(f"Error al cerrar posición de {symbol}: {e}") from e
 
+    estado = _cargar_estado()
+    estado.pop(symbol, None)
+    _guardar_estado(estado)
+    print(f"  ✅ [{symbol}] POSICIÓN CERRADA — motivo: {motivo}")
 
-# ─────────────────────────────────────────────
-# Monitoreo de SL/TP (reemplaza al Bracket Order)
-# ─────────────────────────────────────────────
+
+# ─── Monitoreo de SL/TP ──────────────────────────────────────────────────────
 
 def monitorear_sl_tp(
     trading_client: TradingClient,
     precios_actuales: dict[str, float],
 ) -> None:
-    """
-    Verifica si alguna posición abierta ha tocado su Stop-Loss o Take-Profit
-    y la cierra automáticamente si es el caso.
+    """Verifica posiciones abiertas y cierra las que tocaron SL o TP.
 
-    Debe llamarse al inicio de cada ciclo, antes de buscar nuevas entradas.
+    Reemplaza el Bracket Order de Alpaca, que no está disponible para
+    órdenes fraccionarias. Debe llamarse antes de buscar nuevas entradas.
 
     Args:
         trading_client:   Cliente de trading de Alpaca.
-        precios_actuales: {symbol: precio_cierre_actual} para cada posición abierta.
+        precios_actuales: {symbol: precio_cierre_actual} para cada posición.
     """
     estado = _cargar_estado()
-    if not estado:
-        return
-
     for symbol, datos in list(estado.items()):
         precio = precios_actuales.get(symbol)
         if precio is None:
             continue
-
-        sl = datos["sl_price"]
-        tp = datos["tp_price"]
-        entrada = datos["entry_price"]
-        pnl_pct = (precio - entrada) / entrada * 100
-
-        if precio <= sl:
-            print(f"  🔴 [{symbol}] Stop-Loss tocado — "
-                  f"entrada: ${entrada:.2f} | actual: ${precio:.2f} | "
-                  f"P&L: {pnl_pct:.2f}%")
-            try:
-                cerrar_posicion(trading_client, symbol, motivo=f"stop-loss ${sl:.2f}")
-            except RuntimeError as e:
-                print(f"  ✗  [{symbol}] Error cerrando SL: {e}")
-
-        elif precio >= tp:
-            print(f"  🟢 [{symbol}] Take-Profit alcanzado — "
-                  f"entrada: ${entrada:.2f} | actual: ${precio:.2f} | "
-                  f"P&L: +{pnl_pct:.2f}%")
-            try:
-                cerrar_posicion(trading_client, symbol, motivo=f"take-profit ${tp:.2f}")
-            except RuntimeError as e:
-                print(f"  ✗  [{symbol}] Error cerrando TP: {e}")
-
-        else:
-            print(f"  📌 [{symbol}] Posición activa — "
-                  f"entrada: ${entrada:.2f} | actual: ${precio:.2f} | "
-                  f"P&L: {pnl_pct:+.2f}% | "
-                  f"SL: ${sl:.2f} | TP: ${tp:.2f}")
+        _evaluar_posicion(trading_client, symbol, precio, datos)
 
 
-# ─────────────────────────────────────────────
-# Punto de entrada principal del Módulo 4
-# ─────────────────────────────────────────────
+def _evaluar_posicion(
+    trading_client: TradingClient,
+    symbol: str,
+    precio: float,
+    datos: dict,
+) -> None:
+    """Evalúa una posición individual y actúa si tocó SL o TP.
+
+    Args:
+        trading_client: Cliente de trading de Alpaca.
+        symbol:         Ticker del activo.
+        precio:         Precio de cierre actual.
+        datos:          Datos de la posición (entry_price, sl_price, tp_price).
+    """
+    sl      = datos["sl_price"]
+    tp      = datos["tp_price"]
+    entrada = datos["entry_price"]
+    pnl_pct = (precio - entrada) / entrada * 100
+
+    if precio <= sl:
+        print(
+            f"  🔴 [{symbol}] Stop-Loss tocado — "
+            f"entrada: ${entrada:.2f} | actual: ${precio:.2f} | P&L: {pnl_pct:.2f}%"
+        )
+        _intentar_cierre(trading_client, symbol, motivo=f"stop-loss ${sl:.2f}")
+
+    elif precio >= tp:
+        print(
+            f"  🟢 [{symbol}] Take-Profit alcanzado — "
+            f"entrada: ${entrada:.2f} | actual: ${precio:.2f} | P&L: +{pnl_pct:.2f}%"
+        )
+        _intentar_cierre(trading_client, symbol, motivo=f"take-profit ${tp:.2f}")
+
+    else:
+        print(
+            f"  📌 [{symbol}] Posición activa — "
+            f"entrada: ${entrada:.2f} | actual: ${precio:.2f} | "
+            f"P&L: {pnl_pct:+.2f}% | SL: ${sl:.2f} | TP: ${tp:.2f}"
+        )
+
+
+def _intentar_cierre(trading_client: TradingClient, symbol: str, motivo: str) -> None:
+    """Intenta cerrar una posición y captura errores sin detener el proceso.
+
+    Args:
+        trading_client: Cliente de trading de Alpaca.
+        symbol:         Ticker del activo.
+        motivo:         Razón del cierre para el log.
+    """
+    try:
+        cerrar_posicion(trading_client, symbol, motivo=motivo)
+    except RuntimeError as e:
+        print(f"  ✗  [{symbol}] Error cerrando posición: {e}")
+
+
+# ─── Punto de entrada del Módulo 4 ──────────────────────────────────────────
 
 def ejecutar_senal(
     trading_client: TradingClient,
     symbol: str,
-    signal,
+    signal: Signal,
     precio_actual: float,
     saldo_disponible: float,
+    config: RiskConfig = DEFAULT_RISK,
 ) -> None:
-    """
-    Evalúa la señal del Módulo 3 y ejecuta la acción correspondiente,
-    aplicando todas las validaciones de riesgo antes de operar.
+    """Evalúa la señal del Módulo 3 y ejecuta la acción correspondiente.
+
+    Aplica todas las validaciones de riesgo antes de operar. Usa un
+    dispatch dict para manejar cada señal sin if/elif anidados (OCP):
+    agregar una nueva señal solo requiere añadir una función y registrarla.
 
     Args:
-        trading_client:    Cliente de trading de Alpaca.
-        symbol:            Ticker del activo.
-        signal:            Señal emitida por el Módulo 3 (Signal enum).
-        precio_actual:     Último precio de cierre del activo.
-        saldo_disponible:  Efectivo real disponible (T+1).
+        trading_client:   Cliente de trading de Alpaca.
+        symbol:           Ticker del activo.
+        signal:           Señal emitida por el Módulo 3.
+        precio_actual:    Último precio de cierre del activo.
+        saldo_disponible: Efectivo real disponible (T+1).
+        config:           Parámetros de riesgo.
     """
-    from src.analysis import Signal
+    handlers = {
+        Signal.BUY:  lambda: _handle_buy(trading_client, symbol, precio_actual, saldo_disponible, config),
+        Signal.SELL: lambda: _handle_sell(trading_client, symbol),
+        Signal.HOLD: lambda: None,
+    }
+    handler = handlers.get(signal)
+    if handler:
+        handler()
 
-    if signal == Signal.BUY:
-        # 1. No duplicar posición
-        if tiene_posicion_abierta(symbol):
-            print(f"  ⚠️  [{symbol}] BUY ignorado — ya hay posición abierta.")
-            return
 
-        # 2. Calcular monto a invertir
-        notional = calcular_notional(saldo_disponible)
-        if notional < MIN_NOTIONAL:
-            print(f"  ⚠️  [{symbol}] BUY ignorado — monto insuficiente (${notional:.2f})")
-            return
+def _handle_buy(
+    trading_client: TradingClient,
+    symbol: str,
+    precio_actual: float,
+    saldo_disponible: float,
+    config: RiskConfig,
+) -> None:
+    """Gestiona la señal BUY: valida, calcula notional y abre la posición."""
+    if tiene_posicion_abierta(symbol):
+        print(f"  ⚠️  [{symbol}] BUY ignorado — ya hay posición abierta.")
+        return
 
-        # 3. Abrir posición fraccionaria
-        try:
-            abrir_posicion(trading_client, symbol, notional, precio_actual)
-            fracciones = notional / precio_actual
-            sl = round(precio_actual * (1 - STOP_LOSS_PCT), 2)
-            tp = round(precio_actual * (1 + TAKE_PROFIT_PCT), 2)
-            print(f"  ✅ [{symbol}] COMPRA fraccionaria — "
-                  f"${notional:.2f} (~{fracciones:.4f} acc) × ${precio_actual:.2f} | "
-                  f"SL: ${sl:.2f} | TP: ${tp:.2f}")
-        except RuntimeError as e:
-            print(f"  ✗  [{symbol}] Error al comprar: {e}")
+    notional = calcular_notional(saldo_disponible, config)
+    if notional < config.min_notional:
+        print(f"  ⚠️  [{symbol}] BUY ignorado — monto insuficiente (${notional:.2f})")
+        return
 
-    elif signal == Signal.SELL:
-        if not tiene_posicion_abierta(symbol):
-            print(f"  ℹ️  [{symbol}] SELL — sin posición abierta, nada que cerrar.")
-            return
-        try:
-            cerrar_posicion(trading_client, symbol, motivo="señal de venta (análisis)")
-        except RuntimeError as e:
-            print(f"  ✗  [{symbol}] Error al cerrar: {e}")
+    try:
+        abrir_posicion(trading_client, symbol, notional, precio_actual, config)
+        fracciones = notional / precio_actual
+        sl = round(precio_actual * (1 - config.stop_loss_pct),   2)
+        tp = round(precio_actual * (1 + config.take_profit_pct), 2)
+        print(
+            f"  ✅ [{symbol}] COMPRA fraccionaria — "
+            f"${notional:.2f} (~{fracciones:.4f} acc) × ${precio_actual:.2f} | "
+            f"SL: ${sl:.2f} | TP: ${tp:.2f}"
+        )
+    except RuntimeError as e:
+        print(f"  ✗  [{symbol}] Error al comprar: {e}")
+
+
+def _handle_sell(trading_client: TradingClient, symbol: str) -> None:
+    """Gestiona la señal SELL: cierra la posición si existe."""
+    if not tiene_posicion_abierta(symbol):
+        print(f"  ℹ️  [{symbol}] SELL — sin posición abierta, nada que cerrar.")
+        return
+    _intentar_cierre(trading_client, symbol, motivo="señal de venta (análisis)")

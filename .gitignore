@@ -17,8 +17,9 @@ venv/
 .venv/
 env/
 
-# Logs
+# Logs y estado del bot (datos de runtime, nunca subir)
 logs/*.log
+logs/posiciones.json
 
 # IDE
 .vscode/

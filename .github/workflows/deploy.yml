@@ -1,0 +1,84 @@
+# ============================================================
+# deploy.yml — Auto-deploy del TradingBot en cada push a master
+# ============================================================
+#
+# Este workflow se dispara automáticamente con cada push a master.
+# Conecta al VPS vía SSH y ejecuta el script de deploy que:
+#   1. Para el contenedor actual
+#   2. Hace git pull
+#   3. Reconstruye la imagen Docker
+#   4. Levanta el nuevo contenedor
+#
+# SECRETOS REQUERIDOS (Settings → Secrets and variables → Actions):
+#   VPS_HOST      — IP o dominio del servidor (ej: 192.168.1.1)
+#   VPS_USER      — Usuario SSH (ej: ubuntu o root)
+#   VPS_SSH_KEY   — Clave privada SSH completa (contenido del archivo id_rsa)
+#   VPS_PORT      — Puerto SSH (usualmente 22)
+#   VPS_APP_DIR   — Ruta al directorio del proyecto en el VPS
+#                   (ej: /home/ubuntu/TradingBot)
+# ============================================================
+
+name: Deploy to VPS
+
+on:
+  push:
+    branches:
+      - master
+
+jobs:
+  deploy:
+    name: SSH Deploy
+    runs-on: ubuntu-latest
+
+    steps:
+      # ── 1. Checkout del código (necesario para que Actions tenga contexto) ──
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # ── 2. Deploy vía SSH ────────────────────────────────────────────────────
+      - name: Deploy via SSH
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host:        ${{ secrets.VPS_HOST }}
+          username:    ${{ secrets.VPS_USER }}
+          key:         ${{ secrets.VPS_SSH_KEY }}
+          port:        ${{ secrets.VPS_PORT }}
+          script: |
+            set -e
+            cd ${{ secrets.VPS_APP_DIR }}
+
+            echo "======================================================"
+            echo "  🔄  Auto-deploy iniciado desde GitHub Actions"
+            echo "  📦  Commit: ${{ github.sha }}"
+            echo "  👤  Por:    ${{ github.actor }}"
+            echo "======================================================"
+
+            # Detener el bot antes de actualizar
+            echo "→ [1/4] Deteniendo bot..."
+            docker compose down tradingbot
+
+            # Traer los últimos cambios del repositorio
+            echo "→ [2/4] Descargando cambios..."
+            git pull origin master
+
+            # Reconstruir la imagen con el código nuevo
+            echo "→ [3/4] Reconstruyendo imagen Docker..."
+            docker compose build tradingbot
+
+            # Levantar el nuevo contenedor en background
+            echo "→ [4/4] Levantando bot..."
+            docker compose up -d tradingbot
+
+            echo "======================================================"
+            echo "  ✅  Deploy completado."
+            echo "======================================================"
+
+      # ── 3. Notificación de éxito/fallo (opcional) ────────────────────────────
+      - name: Notify deploy result
+        if: always()
+        run: |
+          if [ "${{ job.status }}" == "success" ]; then
+            echo "✅ Deploy exitoso — commit ${{ github.sha }}"
+          else
+            echo "❌ Deploy FALLIDO — revisar logs de Actions"
+          fi
