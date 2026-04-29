@@ -8,7 +8,7 @@ Módulos activos:
     [✓] Módulo 1: Setup y Conexión
     [✓] Módulo 2: Motor de Datos
     [✓] Módulo 3: Motor de Análisis
-    [✓] Módulo 4: Ejecución y Riesgo
+    [✓] Módulo 4: Ejecución y Riesgo (fracciones + SL/TP manual)
     [ ] Módulo 5: Sentimiento de Noticias
 """
 
@@ -18,16 +18,19 @@ import schedule
 from alpaca.data.timeframe import TimeFrame
 
 from src.broker    import get_clients, print_account_summary, get_available_cash, is_market_open
-from src.data_feed import get_historical_bars, get_latest_quote, print_latest_bar
+from src.data_feed import get_historical_bars, get_latest_bar, print_latest_bar
 from src.analysis  import calculate_indicators, get_signal, print_analysis, Signal
-from src.execution import ejecutar_senal
+from src.execution import (
+    ejecutar_senal, monitorear_sl_tp,
+    get_posiciones_abiertas, tiene_posicion_abierta,
+)
 
 # ─────────────────────────────────────────────
 # CONFIGURACIÓN
 # ─────────────────────────────────────────────
-SYMBOLS    = ["SPY", "AAPL", "TSLA"]
-TIMEFRAME  = TimeFrame.Minute
-DAYS_BACK  = 2       # Histórico para indicadores
+SYMBOLS   = ["SPY", "AAPL", "TSLA", "NVDA"]
+TIMEFRAME = TimeFrame.Minute
+DAYS_BACK = 2
 
 # Clientes de sesión (se inicializan una vez al arrancar)
 trading_client = None
@@ -35,10 +38,7 @@ data_client    = None
 
 
 def iniciar_sesion() -> bool:
-    """
-    Conecta con Alpaca y verifica la cuenta.
-    Retorna True si la conexión fue exitosa.
-    """
+    """Conecta con Alpaca y verifica la cuenta."""
     global trading_client, data_client
     try:
         print("  Conectando con Alpaca API...")
@@ -55,49 +55,61 @@ def ciclo_de_trading():
     """
     Ciclo principal del bot. Se ejecuta en cada intervalo programado.
 
-    Flujo completo:
-        1. Verificar si el mercado está abierto → si no, saltar.
-        2. [Módulo 1] Leer saldo disponible (T+1).
-        3. Por cada símbolo en SYMBOLS:
-           a. [Módulo 2] Obtener velas históricas.
-           b. [Módulo 3] Calcular indicadores y generar señal.
-           c. [Módulo 4] Ejecutar acción según señal (BUY/SELL/HOLD).
+    Flujo:
+        1. Verificar horario de mercado.
+        2. [Módulo 1] Saldo disponible (T+1).
+        3. [Módulo 4] Monitorear SL/TP de posiciones ya abiertas.
+        4. Por cada símbolo:
+           a. [Módulo 2] Obtener datos históricos.
+           b. [Módulo 3] Calcular indicadores y señal.
+           c. [Módulo 4] Ejecutar acción (compra fraccionaria o cierre).
     """
     print("\n  ⏱  Ejecutando ciclo de trading...")
 
     try:
-        # — Paso 1: Verificar horario de mercado —
+        # — Paso 1: Horario de mercado —
         if not is_market_open(trading_client):
             print("  💤 Mercado cerrado — ciclo omitido.\n")
             return
 
-        # — Paso 2: Saldo disponible (Módulo 1) —
+        # — Paso 2: Saldo disponible —
         saldo = get_available_cash(trading_client)
         print(f"  💰 Saldo disponible (T+1): ${saldo:,.2f}")
 
-        print("  📊 Análisis y ejecución:")
+        # — Paso 3: Monitoreo de SL/TP de posiciones abiertas —
+        posiciones = get_posiciones_abiertas()
+        if posiciones:
+            print(f"  🔍 Monitoreando {len(posiciones)} posición(es) abierta(s):")
+            # Obtener precio actual de cada posición abierta
+            precios = {}
+            for symbol in posiciones:
+                bar = get_latest_bar(data_client, symbol)
+                if bar is not None:
+                    precios[symbol] = float(bar["close"])
+            monitorear_sl_tp(trading_client, precios)
+
+        # — Paso 4: Análisis y ejecución por símbolo —
+        print("  📊 Análisis de señales:")
         for symbol in SYMBOLS:
-            # — Paso 3a: Datos históricos (Módulo 2) —
+            # a. Datos históricos
             df = get_historical_bars(
                 client=data_client,
                 symbol=symbol,
                 timeframe=TIMEFRAME,
                 days_back=DAYS_BACK,
             )
-
             if df.empty:
-                print(f"  🟡 [{symbol}] Sin datos históricos disponibles.")
+                print(f"  🟡 [{symbol}] Sin datos disponibles.")
                 continue
 
-            # Mostrar última vela
             print_latest_bar(symbol, df.iloc[-1])
 
-            # — Paso 3b: Calcular indicadores y señal (Módulo 3) —
+            # b. Indicadores y señal
             df_ind = calculate_indicators(df)
             result = get_signal(df_ind, symbol=symbol)
             print_analysis(result)
 
-            # — Paso 3c: Ejecutar según señal (Módulo 4) —
+            # c. Ejecución (solo si no tiene ya posición abierta para BUY)
             ejecutar_senal(
                 trading_client=trading_client,
                 symbol=symbol,
@@ -119,10 +131,8 @@ def main():
     if not iniciar_sesion():
         sys.exit(1)
 
-    # Ejecutar un ciclo inmediato al arrancar
     ciclo_de_trading()
 
-    # Programar ciclos cada 5 minutos
     schedule.every(5).minutes.do(ciclo_de_trading)
     print("  🕐 Scheduler activo — ciclo cada 5 minutos. Ctrl+C para detener.\n")
 
