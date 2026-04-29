@@ -7,9 +7,9 @@ Ejecuta este archivo para iniciar el bot:
 Módulos activos:
     [✓] Módulo 1: Setup y Conexión
     [✓] Módulo 2: Motor de Datos
-    [✓] Módulo 3: Motor de Análisis
-    [✓] Módulo 4: Ejecución y Riesgo (fracciones + SL/TP manual)
-    [ ] Módulo 5: Sentimiento de Noticias
+    [✓] Módulo 3: Motor de Análisis     (EMA9/EMA21 + RSI14)
+    [✓] Módulo 4: Ejecución y Riesgo    (fracciones + SL/TP manual)
+    [✓] Módulo 5: Sentimiento de Noticias (Alpaca News + Claude Haiku)
 """
 
 import sys
@@ -22,8 +22,10 @@ from src.data_feed import get_historical_bars, get_latest_bar, print_latest_bar
 from src.analysis  import calculate_indicators, get_signal, print_analysis, Signal
 from src.execution import (
     ejecutar_senal, monitorear_sl_tp,
-    get_posiciones_abiertas, tiene_posicion_abierta,
+    get_posiciones_abiertas,
 )
+from src.sentiment import get_sentiment, print_sentiment
+from src.config    import get_config
 
 # ─────────────────────────────────────────────
 # CONFIGURACIÓN
@@ -32,19 +34,29 @@ SYMBOLS   = ["SPY", "AAPL", "TSLA", "NVDA"]
 TIMEFRAME = TimeFrame.Minute
 DAYS_BACK = 2
 
-# Clientes de sesión (se inicializan una vez al arrancar)
+# Clientes de sesión y configuración
 trading_client = None
 data_client    = None
+config         = None
 
 
 def iniciar_sesion() -> bool:
     """Conecta con Alpaca y verifica la cuenta."""
-    global trading_client, data_client
+    global trading_client, data_client, config
     try:
         print("  Conectando con Alpaca API...")
+        config = get_config()
         trading_client, data_client = get_clients()
         print("  ✓ Conexión establecida.\n")
         print_account_summary(trading_client)
+
+        # Informar si el Módulo 5 está activo
+        import os
+        if os.getenv("ANTHROPIC_API_KEY", "").strip():
+            print("  🧠 Módulo 5 (Sentimiento) ACTIVO — usando Claude Haiku\n")
+        else:
+            print("  ℹ️  Módulo 5 (Sentimiento) inactivo — configura ANTHROPIC_API_KEY para activarlo\n")
+
         return True
     except (ValueError, ConnectionError, RuntimeError) as e:
         print(f"\n  ✗ ERROR de conexión: {e}")
@@ -55,14 +67,15 @@ def ciclo_de_trading():
     """
     Ciclo principal del bot. Se ejecuta en cada intervalo programado.
 
-    Flujo:
-        1. Verificar horario de mercado.
-        2. [Módulo 1] Saldo disponible (T+1).
-        3. [Módulo 4] Monitorear SL/TP de posiciones ya abiertas.
-        4. Por cada símbolo:
-           a. [Módulo 2] Obtener datos históricos.
-           b. [Módulo 3] Calcular indicadores y señal.
-           c. [Módulo 4] Ejecutar acción (compra fraccionaria o cierre).
+    Flujo completo (5 módulos):
+        1.  Verificar horario de mercado.
+        2.  [M1] Saldo disponible (T+1).
+        3.  [M4] Monitorear SL/TP de posiciones ya abiertas.
+        4.  Por cada símbolo:
+            a. [M2] Datos históricos.
+            b. [M3] Indicadores y señal técnica.
+            c. [M5] Sentimiento de noticias (filtro adicional).
+            d. [M4] Ejecutar acción resultante.
     """
     print("\n  ⏱  Ejecutando ciclo de trading...")
 
@@ -80,7 +93,6 @@ def ciclo_de_trading():
         posiciones = get_posiciones_abiertas()
         if posiciones:
             print(f"  🔍 Monitoreando {len(posiciones)} posición(es) abierta(s):")
-            # Obtener precio actual de cada posición abierta
             precios = {}
             for symbol in posiciones:
                 bar = get_latest_bar(data_client, symbol)
@@ -88,10 +100,11 @@ def ciclo_de_trading():
                     precios[symbol] = float(bar["close"])
             monitorear_sl_tp(trading_client, precios)
 
-        # — Paso 4: Análisis y ejecución por símbolo —
+        # — Paso 4: Análisis, sentimiento y ejecución por símbolo —
         print("  📊 Análisis de señales:")
         for symbol in SYMBOLS:
-            # a. Datos históricos
+
+            # 4a. Datos históricos (Módulo 2)
             df = get_historical_bars(
                 client=data_client,
                 symbol=symbol,
@@ -104,16 +117,32 @@ def ciclo_de_trading():
 
             print_latest_bar(symbol, df.iloc[-1])
 
-            # b. Indicadores y señal
+            # 4b. Indicadores y señal técnica (Módulo 3)
             df_ind = calculate_indicators(df)
             result = get_signal(df_ind, symbol=symbol)
             print_analysis(result)
 
-            # c. Ejecución (solo si no tiene ya posición abierta para BUY)
+            # 4c. Sentimiento de noticias (Módulo 5)
+            # Solo se consulta si hay una señal BUY (evita llamadas innecesarias)
+            senal_final = result.signal
+            if result.signal == Signal.BUY:
+                sentiment = get_sentiment(
+                    symbol=symbol,
+                    alpaca_api_key=config["api_key"],
+                    alpaca_secret_key=config["secret_key"],
+                )
+                print_sentiment(sentiment)
+
+                # Filtro: bloquear BUY si sentimiento es negativo
+                if sentiment.available and sentiment.score < 0:
+                    print(f"  ⚠️  [{symbol}] BUY bloqueado por sentimiento negativo.")
+                    senal_final = Signal.HOLD
+
+            # 4d. Ejecución (Módulo 4)
             ejecutar_senal(
                 trading_client=trading_client,
                 symbol=symbol,
-                signal=result.signal,
+                signal=senal_final,
                 precio_actual=result.close,
                 saldo_disponible=saldo,
             )

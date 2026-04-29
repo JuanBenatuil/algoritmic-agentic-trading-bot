@@ -12,3 +12,6 @@ python-dotenv>=1.0.0
 
 # Scheduler para ejecución periódica
 schedule>=1.2.0
+
+# Módulo 5: Sentimiento de Noticias — LLM via Anthropic (Claude Haiku)
+anthropic>=0.40.0
