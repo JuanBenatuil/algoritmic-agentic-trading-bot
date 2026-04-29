@@ -44,33 +44,38 @@ jobs:
           key:         ${{ secrets.VPS_SSH_KEY }}
           port:        ${{ secrets.VPS_PORT }}
           script: |
+            # Exportar PATH completo — las sesiones SSH no-interactivas
+            # (como las de GitHub Actions) arrancan sin el PATH del usuario,
+            # por lo que docker y git pueden no encontrarse sin esto.
+            export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/snap/bin
+
             set -e
             cd ${{ secrets.VPS_APP_DIR }}
 
             echo "======================================================"
-            echo "  🔄  Auto-deploy iniciado desde GitHub Actions"
-            echo "  📦  Commit: ${{ github.sha }}"
-            echo "  👤  Por:    ${{ github.actor }}"
+            echo "  Auto-deploy iniciado desde GitHub Actions"
+            echo "  Commit: ${{ github.sha }}"
+            echo "  Por:    ${{ github.actor }}"
             echo "======================================================"
 
             # Detener el bot antes de actualizar
-            echo "→ [1/4] Deteniendo bot..."
+            echo "-> [1/4] Deteniendo bot..."
             docker compose down tradingbot
 
             # Traer los últimos cambios del repositorio
-            echo "→ [2/4] Descargando cambios..."
+            echo "-> [2/4] Descargando cambios..."
             git pull origin master
 
-            # Reconstruir la imagen con el código nuevo
-            echo "→ [3/4] Reconstruyendo imagen Docker..."
+            # Reconstruir la imagen con el codigo nuevo
+            echo "-> [3/4] Reconstruyendo imagen Docker..."
             docker compose build tradingbot
 
             # Levantar el nuevo contenedor en background
-            echo "→ [4/4] Levantando bot..."
+            echo "-> [4/4] Levantando bot..."
             docker compose up -d tradingbot
 
             echo "======================================================"
-            echo "  ✅  Deploy completado."
+            echo "  Deploy completado exitosamente."
             echo "======================================================"
 
       # ── 3. Notificación de éxito/fallo (opcional) ────────────────────────────
