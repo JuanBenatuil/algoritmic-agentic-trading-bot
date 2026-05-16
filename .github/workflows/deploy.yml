@@ -58,13 +58,13 @@ jobs:
             echo "  Por:    ${{ github.actor }}"
             echo "======================================================"
 
-            # Detener el bot antes de actualizar
-            echo "-> [1/4] Deteniendo bot..."
-            docker compose down tradingbot
-
-            # Traer los últimos cambios del repositorio
-            echo "-> [2/4] Descargando cambios..."
+            # Traer los últimos cambios primero (asegura que docker-compose.yml existe)
+            echo "-> [1/4] Descargando cambios..."
             git pull origin master
+
+            # Detener el bot (|| true para no fallar si no hay contenedor previo)
+            echo "-> [2/4] Deteniendo bot..."
+            docker compose down tradingbot || true
 
             # Reconstruir la imagen con el codigo nuevo
             echo "-> [3/4] Reconstruyendo imagen Docker..."
