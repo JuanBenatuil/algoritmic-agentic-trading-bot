@@ -28,6 +28,7 @@ from alpaca.trading.enums import OrderSide, TimeInForce
 from alpaca.trading.requests import MarketOrderRequest
 
 from src.analysis import Signal
+from src.notifier import notify_buy, notify_sell, notify_stop_loss, notify_take_profit
 
 
 # ─── Configuración de riesgo ─────────────────────────────────────────────────
@@ -197,6 +198,7 @@ def cerrar_posicion(
     estado.pop(symbol, None)
     _guardar_estado(estado)
     print(f"  ✅ [{symbol}] POSICIÓN CERRADA — motivo: {motivo}")
+    notify_sell(symbol, motivo)
 
 
 # ─── Monitoreo de SL/TP ──────────────────────────────────────────────────────
@@ -246,6 +248,7 @@ def _evaluar_posicion(
             f"  🔴 [{symbol}] Stop-Loss tocado — "
             f"entrada: ${entrada:.2f} | actual: ${precio:.2f} | P&L: {pnl_pct:.2f}%"
         )
+        notify_stop_loss(symbol, entrada, precio, pnl_pct)
         _intentar_cierre(trading_client, symbol, motivo=f"stop-loss ${sl:.2f}")
 
     elif precio >= tp:
@@ -253,6 +256,7 @@ def _evaluar_posicion(
             f"  🟢 [{symbol}] Take-Profit alcanzado — "
             f"entrada: ${entrada:.2f} | actual: ${precio:.2f} | P&L: +{pnl_pct:.2f}%"
         )
+        notify_take_profit(symbol, entrada, precio, pnl_pct)
         _intentar_cierre(trading_client, symbol, motivo=f"take-profit ${tp:.2f}")
 
     else:
@@ -338,6 +342,7 @@ def _handle_buy(
             f"${notional:.2f} (~{fracciones:.4f} acc) × ${precio_actual:.2f} | "
             f"SL: ${sl:.2f} | TP: ${tp:.2f}"
         )
+        notify_buy(symbol, notional, precio_actual, sl, tp)
     except RuntimeError as e:
         print(f"  ✗  [{symbol}] Error al comprar: {e}")
 

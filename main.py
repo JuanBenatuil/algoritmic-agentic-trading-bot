@@ -49,6 +49,7 @@ from src.broker import (
 from src.config import AppConfig, get_config
 from src.data_feed import get_historical_bars, get_latest_bar, print_latest_bar
 from src.execution import ejecutar_senal, get_posiciones_abiertas, monitorear_sl_tp
+from src.notifier import notify_cycle, notify_error, notify_shutdown, notify_startup
 from src.sentiment import get_sentiment, print_sentiment
 
 # ─── Constantes de configuración del bot ─────────────────────────────────────
@@ -116,7 +117,9 @@ class TradingBot:
         else:
             print("  ℹ️  Módulo 5 (Sentimiento) inactivo — configura ANTHROPIC_API_KEY para activarlo\n")
 
-        return cls(config, trading_client, data_client)
+        bot = cls(config, trading_client, data_client)
+        notify_startup(config.mode, SYMBOLS)
+        return bot
 
     # ─── Ciclo de monitoreo (SL/TP cada 30 minutos) ──────────────────────────
 
@@ -165,6 +168,8 @@ class TradingBot:
                 print("  💤 Mercado cerrado — ciclo omitido.\n")
                 return
 
+            notify_cycle(momento)
+
             saldo = get_available_cash(self.trading_client)
             print(f"  💰 Saldo disponible (T+1): ${saldo:,.2f}")
 
@@ -178,6 +183,7 @@ class TradingBot:
 
         except Exception as e:
             print(f"  ✗ Error en ciclo de análisis: {e}")
+            notify_error(f"ciclo {momento}", str(e))
 
     # ─── Tick principal (cada minuto) ────────────────────────────────────────
 
@@ -349,5 +355,6 @@ if __name__ == "__main__":
     try:
         main()
     except KeyboardInterrupt:
+        notify_shutdown()
         print("\n\n  🛑 Bot detenido manualmente.\n")
         sys.exit(0)
