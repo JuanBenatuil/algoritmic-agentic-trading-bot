@@ -23,4 +23,4 @@ services:
       - ./logs:/app/logs           # Logs persistentes en el host (no se pierden al recrear el contenedor)
     environment:
       - PYTHONUNBUFFERED=1
-    # El bot NO depende del MCP server — ambos hablan con Alpaca directamente
+
