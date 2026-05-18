@@ -24,27 +24,3 @@ services:
     environment:
       - PYTHONUNBUFFERED=1
     # El bot NO depende del MCP server — ambos hablan con Alpaca directamente
-
-  # -------------------------------------------
-  # Servicio 2: Alpaca MCP Server
-  # Permite que Claude/Cowork interactúe con
-  # la cuenta de Alpaca vía protocolo MCP.
-  # -------------------------------------------
-  alpaca-mcp-server:
-    build:
-      context: ./alpaca-mcp-server
-      dockerfile: Dockerfile.dev
-    image: alpaca-mcp-server:dev
-    restart: unless-stopped
-    ports:
-      - "8000:8000"                # Exponer solo si necesitas acceso externo al MCP server
-    env_file:
-      - .env
-    volumes:
-      # FIX: montar el src del MCP server, no el del bot
-      - ./alpaca-mcp-server/src:/app/src:delegated
-      - ./alpaca-mcp-server/pyproject.toml:/app/pyproject.toml:ro
-      - ./alpaca-mcp-server/uv.lock:/app/uv.lock:ro
-    environment:
-      - PYTHONUNBUFFERED=1
-    command: ["alpaca-mcp-server", "--transport", "streamable-http", "--host", "0.0.0.0", "--port", "8000"]
