@@ -31,6 +31,7 @@ Principios SOLID aplicados:
 import os
 import sys
 import time
+from dataclasses import dataclass
 from datetime import date, datetime
 from zoneinfo import ZoneInfo
 
@@ -52,16 +53,37 @@ from src.execution import ejecutar_senal, get_posiciones_abiertas, monitorear_sl
 from src.notifier import notify_cycle, notify_error, notify_shutdown, notify_startup
 from src.sentiment import get_sentiment, print_sentiment
 
-# ─── Constantes de configuración del bot ─────────────────────────────────────
+# ─── Configuración del bot ───────────────────────────────────────────────────
 
-SYMBOLS   = ["SPY", "AAPL", "TSLA", "NVDA"]
-TIMEFRAME = TimeFrame(15, TimeFrameUnit.Minute)
-DAYS_BACK = 5  # ~130 velas (26 por día × 5 días)
-ET        = ZoneInfo("America/New_York")
+ET = ZoneInfo("America/New_York")
 
-# Horarios de análisis completo (hora ET)
-ANALISIS_APERTURA = (9, 35)   # Primeros minutos del mercado ya estabilizados
-ANALISIS_MEDIODIA = (12, 30)  # Mitad del día de trading
+
+@dataclass(frozen=True)
+class AnalysisSlot:
+    name: str
+    hour: int
+    minute: int
+
+
+@dataclass(frozen=True)
+class BotSettings:
+    symbols: list[str]
+    timeframe: TimeFrame
+    days_back: int
+    timezone: ZoneInfo
+    analysis_slots: tuple[AnalysisSlot, ...]
+
+
+DEFAULT_SETTINGS = BotSettings(
+    symbols=["SPY", "AAPL", "TSLA", "NVDA"],
+    timeframe=TimeFrame(15, TimeFrameUnit.Minute),
+    days_back=5,  # ~130 velas (26 por dia x 5 dias)
+    timezone=ET,
+    analysis_slots=(
+        AnalysisSlot(name="apertura", hour=9, minute=35),
+        AnalysisSlot(name="mediodia", hour=12, minute=30),
+    ),
+)
 
 
 # ─── Clase principal ─────────────────────────────────────────────────────────
@@ -83,11 +105,14 @@ class TradingBot:
         config: AppConfig,
         trading_client: TradingClient,
         data_client: StockHistoricalDataClient,
+        settings: BotSettings = DEFAULT_SETTINGS,
     ) -> None:
         self.config         = config
         self.trading_client = trading_client
         self.data_client    = data_client
+        self.settings       = settings
         self._ejecutados_hoy: set[str] = set()
+        self._dia_actual: date | None = None
 
     # ─── Constructor alternativo (factory) ───────────────────────────────────
 
@@ -118,7 +143,7 @@ class TradingBot:
             print("  ℹ️  Módulo 5 (Sentimiento) inactivo — configura ANTHROPIC_API_KEY para activarlo\n")
 
         bot = cls(config, trading_client, data_client)
-        notify_startup(config.mode, SYMBOLS)
+        notify_startup(config.mode, bot.settings.symbols)
         return bot
 
     # ─── Ciclo de monitoreo (SL/TP cada 30 minutos) ──────────────────────────
@@ -133,7 +158,7 @@ class TradingBot:
         if not posiciones:
             return
 
-        now_et = datetime.now(ET).strftime("%H:%M ET")
+        now_et = datetime.now(self.settings.timezone).strftime("%H:%M ET")
         print(f"\n  🔍 [{now_et}] Monitoreo de {len(posiciones)} posición(es):")
 
         try:
@@ -158,7 +183,7 @@ class TradingBot:
         Args:
             momento: Etiqueta del ciclo ("apertura" o "mediodía") para el log.
         """
-        now_et = datetime.now(ET).strftime("%H:%M ET")
+        now_et = datetime.now(self.settings.timezone).strftime("%H:%M ET")
         print(f"\n{'='*52}")
         print(f"  ⏱  Ciclo de análisis — {momento.upper()} ({now_et})")
         print(f"{'='*52}")
@@ -176,7 +201,7 @@ class TradingBot:
             self._monitorear_posiciones_previo()
 
             print("\n  📊 Análisis de señales (velas 15 min):")
-            for symbol in SYMBOLS:
+            for symbol in self.settings.symbols:
                 self._analizar_simbolo(symbol, saldo)
 
             print(f"\n  ✓ Ciclo {momento} completado.\n")
@@ -194,23 +219,21 @@ class TradingBot:
         corre exactamente una vez por día, aunque el proceso haga varios
         ticks en el mismo minuto (deduplicación por clave fecha+momento).
         """
-        now_et = datetime.now(ET)
+        now_et = datetime.now(self.settings.timezone)
         hoy    = now_et.date()
         hora   = now_et.hour
         minuto = now_et.minute
 
         self._resetear_registro_si_nuevo_dia(hoy)
 
-        clave_apertura = f"{hoy}_apertura"
-        if (hora, minuto) == ANALISIS_APERTURA and clave_apertura not in self._ejecutados_hoy:
-            self._ejecutados_hoy.add(clave_apertura)
-            self.ciclo_analisis("apertura")
-            return
-
-        clave_mediodia = f"{hoy}_mediodia"
-        if (hora, minuto) == ANALISIS_MEDIODIA and clave_mediodia not in self._ejecutados_hoy:
-            self._ejecutados_hoy.add(clave_mediodia)
-            self.ciclo_analisis("mediodía")
+        for slot in self.settings.analysis_slots:
+            if (hora, minuto) != (slot.hour, slot.minute):
+                continue
+            clave = f"{hoy}_{slot.name}"
+            if clave in self._ejecutados_hoy:
+                return
+            self._ejecutados_hoy.add(clave)
+            self.ciclo_analisis(slot.name)
             return
 
         if minuto in (0, 30):
@@ -270,8 +293,8 @@ class TradingBot:
         df = get_historical_bars(
             client=self.data_client,
             symbol=symbol,
-            timeframe=TIMEFRAME,
-            days_back=DAYS_BACK,
+            timeframe=self.settings.timeframe,
+            days_back=self.settings.days_back,
         )
         if df.empty:
             print(f"  🟡 [{symbol}] Sin datos disponibles.")
@@ -323,22 +346,24 @@ class TradingBot:
 
     def _resetear_registro_si_nuevo_dia(self, hoy: date) -> None:
         """Limpia el registro de ciclos ejecutados al cambiar de día."""
-        clave_hoy = str(hoy)
-        if not any(k.startswith(clave_hoy) for k in self._ejecutados_hoy):
+        if self._dia_actual != hoy:
+            self._dia_actual = hoy
             self._ejecutados_hoy.clear()
 
     def _imprimir_configuracion(self) -> None:
         """Muestra el resumen de configuración al arrancar el bot."""
-        now_et       = datetime.now(ET)
-        apertura_str = f"{ANALISIS_APERTURA[0]:02d}:{ANALISIS_APERTURA[1]:02d} ET"
-        mediodia_str = f"{ANALISIS_MEDIODIA[0]:02d}:{ANALISIS_MEDIODIA[1]:02d} ET"
+        now_et = datetime.now(self.settings.timezone)
+        apertura = self.settings.analysis_slots[0]
+        mediodia = self.settings.analysis_slots[1]
+        apertura_str = f"{apertura.hour:02d}:{apertura.minute:02d} ET"
+        mediodia_str = f"{mediodia.hour:02d}:{mediodia.minute:02d} ET"
 
         print(f"  📅 Hora actual         : {now_et.strftime('%Y-%m-%d %H:%M ET')}")
         print(f"  🔔 Análisis apertura   : {apertura_str}")
         print(f"  🔔 Análisis mediodía   : {mediodia_str}")
         print(f"  🔄 Monitoreo SL/TP     : cada 30 minutos")
         print(f"  📊 Temporalidad velas  : 15 minutos")
-        print(f"  📈 Símbolos            : {', '.join(SYMBOLS)}")
+        print(f"  📈 Símbolos            : {', '.join(self.settings.symbols)}")
         print(f"  🏦 Modo               : {self.config.mode.upper()}\n")
 
 
