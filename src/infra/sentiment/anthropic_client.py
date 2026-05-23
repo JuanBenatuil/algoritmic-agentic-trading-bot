@@ -40,6 +40,12 @@ def score_headlines(
             messages=[{"role": "user", "content": prompt}],
         )
         raw = message.content[0].text.strip()
+        # Claude a veces envuelve el JSON en ```json ... ``` — lo limpiamos
+        if raw.startswith("```"):
+            raw = raw.split("```")[1]
+            if raw.startswith("json"):
+                raw = raw[4:]
+            raw = raw.strip()
         data = json.loads(raw)
         score = int(data.get("score", 0))
         reason = str(data.get("reason", "sin razon"))
