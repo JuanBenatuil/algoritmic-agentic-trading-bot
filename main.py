@@ -52,6 +52,7 @@ from src.data_feed import get_historical_bars, get_latest_bar, print_latest_bar
 from src.execution import ejecutar_senal, get_posiciones_abiertas, monitorear_sl_tp
 from src.notifier import notify_cycle, notify_error, notify_shutdown, notify_startup
 from src.sentiment import get_sentiment, print_sentiment
+from src.services.universe_service import build_daily_universe
 
 # ─── Configuración del bot ───────────────────────────────────────────────────
 
@@ -113,6 +114,7 @@ class TradingBot:
         self.settings       = settings
         self._ejecutados_hoy: set[str] = set()
         self._dia_actual: date | None = None
+        self._universo: list[str] = list(settings.symbols)
 
     # ─── Constructor alternativo (factory) ───────────────────────────────────
 
@@ -143,7 +145,7 @@ class TradingBot:
             print("  ℹ️  Módulo 5 (Sentimiento) inactivo — configura ANTHROPIC_API_KEY para activarlo\n")
 
         bot = cls(config, trading_client, data_client)
-        notify_startup(config.mode, bot.settings.symbols)
+        notify_startup(config.mode, bot._universo)
         return bot
 
     # ─── Ciclo de monitoreo (SL/TP cada 30 minutos) ──────────────────────────
@@ -200,8 +202,12 @@ class TradingBot:
 
             self._monitorear_posiciones_previo()
 
-            print("\n  📊 Análisis de señales (velas 15 min):")
-            for symbol in self.settings.symbols:
+            # Actualizar universo una vez por día (en el ciclo de apertura)
+            if momento == "apertura":
+                self._actualizar_universo()
+
+            print(f"\n  📊 Análisis de {len(self._universo)} símbolos (velas 15 min):")
+            for symbol in self._universo:
                 self._analizar_simbolo(symbol, saldo)
 
             print(f"\n  ✓ Ciclo {momento} completado.\n")
@@ -261,6 +267,24 @@ class TradingBot:
             time.sleep(30)
 
     # ─── Helpers privados ─────────────────────────────────────────────────────
+
+    def _actualizar_universo(self) -> None:
+        """Descubre las mejores acciones del día usando el módulo de universo.
+
+        Llama a build_daily_universe que: filtra ~50 acciones por momentum
+        técnico y pide a Claude que elija las mejores según noticias del día.
+        Actualiza self._universo para que el ciclo de análisis las use.
+        """
+        try:
+            nuevo = build_daily_universe(
+                data_client=self.data_client,
+                alpaca_api_key=self.config.api_key,
+                alpaca_secret_key=self.config.secret_key,
+            )
+            if nuevo:
+                self._universo = nuevo
+        except Exception as e:
+            print(f"  ⚠️  Error actualizando universo: {e} — se mantiene lista anterior.")
 
     def _obtener_precios_actuales(self, posiciones: dict) -> dict[str, float]:
         """Consulta el precio actual de cada símbolo con posición abierta."""
@@ -363,7 +387,8 @@ class TradingBot:
         print(f"  🔔 Análisis mediodía   : {mediodia_str}")
         print(f"  🔄 Monitoreo SL/TP     : cada 30 minutos")
         print(f"  📊 Temporalidad velas  : 15 minutos")
-        print(f"  📈 Símbolos            : {', '.join(self.settings.symbols)}")
+        print(f"  🌐 Universo base       : {', '.join(self.settings.symbols)}")
+        print(f"  🔬 Universo dinámico   : se actualiza cada mañana (~50 acciones → top 10)")
         print(f"  🏦 Modo               : {self.config.mode.upper()}\n")
 
 
