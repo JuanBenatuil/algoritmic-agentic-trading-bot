@@ -12,6 +12,7 @@ from src.services.notification_service import (
     notify_startup,
     notify_stop_loss,
     notify_take_profit,
+    notify_universe,
 )
 
 __all__ = [
@@ -24,4 +25,5 @@ __all__ = [
     "notify_startup",
     "notify_stop_loss",
     "notify_take_profit",
+    "notify_universe",
 ]

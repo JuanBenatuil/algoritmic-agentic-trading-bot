@@ -62,6 +62,17 @@ def notify_take_profit(symbol: str, entrada: float, actual: float, pnl_pct: floa
     )
 
 
+def notify_universe(symbols: list[str], total_pool: int, total_candidatos: int, reason: str) -> None:
+    symbols_str = " · ".join(f"<code>{s}</code>" for s in symbols)
+    reason_line = f"\n💡 {reason}" if reason else ""
+    notify(
+        f"🌐 <b>Universo del día ({len(symbols)} acciones)</b>\n"
+        f"Pool analizado: {total_pool} · Con momentum: {total_candidatos}\n"
+        f"{symbols_str}"
+        f"{reason_line}"
+    )
+
+
 def notify_error(context: str, error: str) -> None:
     notify(f"❌ <b>Error — {context}</b>\n<code>{error}</code>")
 

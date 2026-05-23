@@ -18,6 +18,8 @@ import logging
 import os
 from datetime import datetime, timedelta, timezone
 
+from src.notifier import notify_universe
+
 logger = logging.getLogger(__name__)
 
 MAX_SYMBOLS = 10
@@ -50,22 +52,25 @@ def build_daily_universe(
 
     if not candidatos:
         print("  ⚠️  Sin candidatos técnicos — usando lista base.")
+        notify_universe(FALLBACK[:max_symbols], len(pool), 0, "sin momentum alcista hoy, usando lista base")
         return FALLBACK[:max_symbols]
 
     print(f"  📈 {len(candidatos)} acciones con momentum alcista confirmado.")
 
     anthropic_key = os.getenv("ANTHROPIC_API_KEY", "")
     if anthropic_key.startswith("sk-ant-"):
-        ranked = _rankear_con_claude(
+        ranked, reason = _rankear_con_claude(
             candidatos, alpaca_api_key, alpaca_secret_key, anthropic_key, max_symbols
         )
         if ranked:
+            notify_universe(ranked, len(pool), len(candidatos), reason)
             return ranked
 
     # Fallback técnico: top N por mayor spread EMA9-EMA21
     top = [s for s, _ in sorted(candidatos.items(), key=lambda x: x[1], reverse=True)]
     result = top[:max_symbols]
     print(f"  📊 Universo técnico (sin Claude): {result}")
+    notify_universe(result, len(pool), len(candidatos), "")
     return result
 
 
@@ -127,11 +132,11 @@ def _rankear_con_claude(
     alpaca_secret_key: str,
     anthropic_key: str,
     max_symbols: int,
-) -> list[str]:
+) -> tuple[list[str], str]:
     """Pide a Claude que elija los mejores símbolos del día según noticias.
 
     Returns:
-        Lista de símbolos seleccionados, o [] si falla.
+        (lista de símbolos seleccionados, razón) — o ([], "") si falla.
     """
     import anthropic
     from src.infra.sentiment.alpaca_news_client import get_headlines
@@ -200,14 +205,14 @@ def _rankear_con_claude(
         reason  = data.get("reason", "")
 
         if not symbols:
-            return []
+            return [], ""
 
         result = symbols[:max_symbols]
         print(f"  🤖 Universo Claude ({len(result)} acciones): {result}")
         if reason:
             print(f"  💡 Razon: {reason}")
-        return result
+        return result, reason
 
     except Exception as exc:
         logger.warning(f"Universe: error en Claude ranking: {exc}")
-        return []
+        return [], ""
